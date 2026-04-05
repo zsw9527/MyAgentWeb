@@ -3,6 +3,8 @@ import { ref, nextTick, watch } from 'vue'
 import { consumeChatStream } from '../utils/streamChat.js'
 
 const CHAT_URL = import.meta.env.VITE_CHAT_URL || '/v1/chat'
+/** 打字机每个字符间隔（毫秒），略快于常人阅读即可 */
+const TYPEWRITER_MS = 36
 
 const messages = ref([])
 const input = ref('')
@@ -36,6 +38,14 @@ async function send() {
   const assistantIndex = messages.value.length - 1
   sending.value = true
 
+  let typeTimer = null
+  const stopTypewriter = () => {
+    if (typeTimer) {
+      clearInterval(typeTimer)
+      typeTimer = null
+    }
+  }
+
   try {
     const res = await fetch(CHAT_URL, {
       method: 'POST',
@@ -49,13 +59,44 @@ async function send() {
     if (!res.ok) {
       const errBody = await res.text()
       messages.value[assistantIndex].content = `请求失败 (${res.status}): ${errBody.slice(0, 500)}`
+      sending.value = false
+      scrollToBottom()
       return
+    }
+
+    let pending = ''
+    let streamEnded = false
+    let shown = 0
+
+    const finishReply = () => {
+      sending.value = false
+      const msg = messages.value[assistantIndex]
+      if (!msg.content.trim()) {
+        msg.content =
+          '（未解析到 reply 文本，请确认返回 JSON 中含字符串字段 reply）'
+      }
+      scrollToBottom()
+    }
+
+    const tick = () => {
+      const msg = messages.value[assistantIndex]
+      const chars = [...pending]
+      if (shown < chars.length) {
+        shown++
+        msg.content = chars.slice(0, shown).join('')
+        scrollToBottom()
+      }
+      if (streamEnded && shown >= chars.length) {
+        stopTypewriter()
+        finishReply()
+      }
     }
 
     await consumeChatStream(
       res,
       (chunk) => {
-        messages.value[assistantIndex].content += chunk
+        pending += chunk
+        if (!typeTimer) typeTimer = setInterval(tick, TYPEWRITER_MS)
       },
       {
         onSessionId: (id) => {
@@ -63,14 +104,19 @@ async function send() {
         },
       }
     )
-
-    if (!messages.value[assistantIndex].content.trim()) {
-      messages.value[assistantIndex].content =
-        '（未解析到 reply 文本，请确认返回 JSON 中含字符串字段 reply）'
+    streamEnded = true
+    if (!typeTimer) {
+      if ([...pending].length === 0) {
+        finishReply()
+      } else {
+        typeTimer = setInterval(tick, TYPEWRITER_MS)
+      }
+    } else {
+      tick()
     }
   } catch (e) {
+    stopTypewriter()
     messages.value[assistantIndex].content = `网络错误: ${e?.message ?? String(e)}`
-  } finally {
     sending.value = false
     scrollToBottom()
   }
